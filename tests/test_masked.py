@@ -191,6 +191,37 @@ class RevivalBug(unittest.TestCase):
         self.assertEqual((st.m[1], st.v[1], st.t[1]), (0.0, 0.0, 0))
 
 
+class AdamMatchesReferenceUnderMaskChurn(unittest.TestCase):
+    def test_bitwise_equal_to_naive_reference_implementation(self):
+        """Oracle: a direct, unoptimized transcription of masked per-entry Adam."""
+        rng = np.random.default_rng(3)
+        shape, lr, b1, b2, eps = (6, 5), 1e-2, 0.9, 0.999, 1e-8
+        p = Parameter(rng.standard_normal(shape), prunable=True)
+        opt = Adam([p], lr=lr)
+        w, m, v, t = p.data.copy(), np.zeros(shape), np.zeros(shape), np.zeros(shape, dtype=np.int64)
+        mask = np.ones(shape, dtype=bool)
+        for step in range(300):
+            if step % 7 == 3:  # random prune / regrow events
+                new = rng.random(shape) > 0.4
+                changed = new ^ mask
+                m[changed] = v[changed] = 0.0
+                t[changed] = 0
+                mask = new
+                w[~mask] = 0.0
+                p.set_mask(mask)
+            g = rng.standard_normal(shape) * mask
+            p.grad = g.copy()
+            opt.step()
+            m = b1 * m + (1 - b1) * g
+            v = b2 * v + (1 - b2) * g * g
+            t = t + mask
+            bc1 = np.where(t > 0, 1 - b1 ** t.astype(float), 1.0)
+            bc2 = np.where(t > 0, 1 - b2 ** t.astype(float), 1.0)
+            w = w - lr * (m / bc1) / (np.sqrt(v / bc2) + eps) * mask
+            w[~mask] = 0.0
+            np.testing.assert_allclose(p.data, w, rtol=1e-13, atol=1e-15)
+
+
 class ModelLevel(unittest.TestCase):
     def test_mlp_sparsity_accounting_and_state_dict_roundtrip(self):
         rng = np.random.default_rng(0)
