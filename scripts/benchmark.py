@@ -8,7 +8,7 @@ A. Real pruned models (Fisher-OBD, global, seed 100 - identical to the sweep run
      csr     - our CSR kernel on every layer
      compact - exact dead-unit removal, then dense/CSR per layer by remaining density
    All engines must agree with the training forward pass (checked here too).
-B. Synthetic scaling (random masks on 3 x 2048 layers): where does our CSR kernel
+B. Synthetic scaling (random masks on 3 x 2048 layers, sparsity >= 80%): where does our CSR kernel
    overtake BLAS?  Timing only - these weights are not trained.
 """
 
@@ -39,21 +39,22 @@ def bench_real(seed: int, repeats: int):
         model = r["_model"]
         specs = export_layers(model)
         ref = reference_forward(model, data.test.X)
-        engines = [DenseEngine(specs), CSREngine(specs), CompactEngine(specs)]
-        for eng in engines:
-            out = eng(data.test.X)
-            np.testing.assert_allclose(out, ref, rtol=1e-9, atol=1e-9)
-            acc = float((out.argmax(1) == data.test.y).mean())
-            for bs in BATCHES:
-                x = np.ascontiguousarray(np.resize(data.test.X, (bs, data.test.X.shape[1])))
+        for bs in BATCHES:
+            x = np.ascontiguousarray(np.resize(data.test.X, (bs, data.test.X.shape[1])))
+            # The compacted engine's kernel plan is autotuned for the serving batch size.
+            for eng in (DenseEngine(specs), CSREngine(specs), CompactEngine(specs, tune_batch=bs)):
+                out = eng(data.test.X)
+                np.testing.assert_allclose(out, ref, rtol=1e-9, atol=1e-9)  # exactness gate
+                acc = float((out.argmax(1) == data.test.y).mean())
                 t = time_callable(eng, x, repeats=repeats, inner=20 if bs == 1 else 2)
+                compact = isinstance(eng, CompactEngine)
                 rows.append({
                     "sparsity": sp, "achieved_sparsity": round(r["sparsity"], 6), "engine": eng.name.split(" ")[0],
                     "batch": bs, "flops_per_example": eng.flops_per_example, "weight_bytes": eng.weight_bytes,
                     "median_us": round(t["median_us"], 2), "p10_us": round(t["p10_us"], 2), "p90_us": round(t["p90_us"], 2),
                     "us_per_example": round(t["median_us"] / bs, 3), "test_acc": acc,
-                    "compact_shapes": str(eng.report["shapes"]) if isinstance(eng, CompactEngine) else "",
-                    "compact_kernels": ",".join(eng.kernels) if isinstance(eng, CompactEngine) else "",
+                    "compact_shapes": str(eng.report["shapes"]) if compact else "",
+                    "compact_kernels": ",".join(eng.kernels) if compact else "",
                 })
         print(f"sparsity {sp:.2f}: " + "  ".join(
             f"{row['engine']}@{row['batch']}={row['median_us']:.0f}us" for row in rows if row["sparsity"] == sp), flush=True)
@@ -64,7 +65,7 @@ def bench_synthetic(repeats: int):
     rng = np.random.default_rng(0)
     width = 2048
     rows = []
-    for sp in [0.0, 0.5, 0.8, 0.9, 0.95, 0.98, 0.99, 0.995]:
+    for sp in [0.8, 0.9, 0.95, 0.98, 0.99, 0.995]:
         specs = []
         for _ in range(3):
             w = rng.standard_normal((width, width)) * (rng.random((width, width)) >= sp)

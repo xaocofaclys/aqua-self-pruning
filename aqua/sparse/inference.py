@@ -140,7 +140,12 @@ def compact_layers(specs: list[LayerSpec]) -> tuple[np.ndarray, list[LayerSpec],
 class CompactEngine:
     name = "compacted + per-layer dense/CSR"
 
-    def __init__(self, specs: list[LayerSpec], csr_below_density: float = 0.1) -> None:
+    def __init__(self, specs: list[LayerSpec], csr_below_density: float = 0.1, *, tune_batch: int | None = None) -> None:
+        """``tune_batch``: if given, pick each layer's kernel by *timing* dense vs
+        CSR at that batch size (the crossover depends on batch size and
+        hardware, so a fixed density threshold is wrong somewhere).  Otherwise
+        fall back to the ``csr_below_density`` rule.  Both kernels are exact,
+        so the choice affects speed only."""
         self.input_index, layers, self.report = compact_layers(specs)
         self.layers = []
         flops = 0
@@ -149,7 +154,10 @@ class CompactEngine:
         for s in layers:
             nnz = int(np.count_nonzero(s.weight))
             density = nnz / max(1, s.weight.size)
-            if density < csr_below_density:
+            use_csr = density < csr_below_density
+            if tune_batch is not None:
+                use_csr = self._csr_is_faster(s.weight, tune_batch)
+            if use_csr:
                 op = CSRMatrix.from_dense(s.weight)
                 self.layers.append((op.matmul, s.bias, _act_fn(s.activation)))
                 flops += 2 * nnz
@@ -162,6 +170,24 @@ class CompactEngine:
                 self.weight_bytes += w.nbytes
                 self.kernels.append("dense")
         self.flops_per_example = flops
+
+    @staticmethod
+    def _csr_is_faster(w: np.ndarray, batch: int, repeats: int = 25) -> bool:
+        import time
+
+        x = np.random.default_rng(0).standard_normal((batch, w.shape[0]))
+        csr, dense = CSRMatrix.from_dense(w), np.ascontiguousarray(w)
+
+        def med(fn):
+            ts = []
+            for _ in range(repeats):
+                t0 = time.perf_counter_ns()
+                fn()
+                ts.append(time.perf_counter_ns() - t0)
+            return float(np.median(ts))
+
+        med(lambda: x @ dense), med(lambda: csr.matmul(x))  # warm-up
+        return med(lambda: csr.matmul(x)) < med(lambda: x @ dense)
 
     def __call__(self, x: np.ndarray) -> np.ndarray:
         x = x[:, self.input_index]

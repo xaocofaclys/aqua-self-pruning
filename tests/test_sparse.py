@@ -28,6 +28,14 @@ class CSR(unittest.TestCase):
         np.testing.assert_allclose(m.matmul(x), x @ w, rtol=1e-12, atol=1e-14)
         self.assertEqual(m.nnz, int(np.count_nonzero(w)))
 
+    def test_chunked_matmul_for_large_batches(self):
+        rng = np.random.default_rng(1)
+        w = rng.standard_normal((50, 40)) * (rng.random((50, 40)) > 0.5)
+        m = CSRMatrix.from_dense(w)
+        m._MAX_TEMP_ELEMS = 3000  # force many chunks
+        x = rng.standard_normal((257, 50))
+        np.testing.assert_allclose(m.matmul(x), x @ w, rtol=1e-12, atol=1e-13)
+
     def test_all_zero_matrix(self):
         m = CSRMatrix.from_dense(np.zeros((4, 3)))
         np.testing.assert_array_equal(m.matmul(np.ones((2, 4))), np.zeros((2, 3)))
@@ -41,7 +49,7 @@ class Engines(unittest.TestCase):
                     model, x = _random_sparse_mlp(sparsity, activation=activation)
                     ref = reference_forward(model, x)
                     specs = export_layers(model)
-                    for engine in (DenseEngine(specs), CSREngine(specs), CompactEngine(specs)):
+                    for engine in (DenseEngine(specs), CSREngine(specs), CompactEngine(specs), CompactEngine(specs, tune_batch=8)):
                         np.testing.assert_allclose(engine(x), ref, rtol=1e-10, atol=1e-10, err_msg=engine.name)
 
     def test_csr_flops_scale_with_nnz(self):

@@ -49,14 +49,20 @@ class CSRMatrix:
         wt[rows, self.indices] = self.data
         return wt.T
 
+    # Bound the (rows x nnz) gather temporary to ~32 MB of float64.
+    _MAX_TEMP_ELEMS = 1 << 22
+
     def matmul(self, x: np.ndarray) -> np.ndarray:
-        """y = x @ W for x of shape (N, in)."""
+        """y = x @ W for x of shape (N, in), processed in memory-bounded row chunks."""
         n = x.shape[0]
         out = np.zeros((n, self.shape[1]), dtype=np.result_type(x, self.data))
         if self.nnz == 0:
             return out
-        gathered = x[:, self.indices] * self.data  # (N, nnz): one multiply per stored entry
-        out[:, self._nonempty] = np.add.reduceat(gathered, self._starts, axis=1)
+        chunk = max(1, self._MAX_TEMP_ELEMS // self.nnz)
+        for start in range(0, n, chunk):
+            xs = x[start : start + chunk]
+            gathered = xs[:, self.indices] * self.data  # one multiply per stored entry
+            out[start : start + chunk, self._nonempty] = np.add.reduceat(gathered, self._starts, axis=1)
         return out
 
     def nbytes(self) -> int:
