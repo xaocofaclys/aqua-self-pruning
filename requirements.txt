@@ -1,0 +1,4 @@
+# Versions the committed results were produced with (see results/*/environment):
+numpy==2.5.3
+matplotlib==3.11.2
+scikit-learn==1.9.1   # dataset loading only (sklearn.datasets.load_digits)

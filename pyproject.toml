@@ -1,0 +1,24 @@
+[project]
+name = "aqua-self-pruning"
+version = "1.0.0"
+description = "A from-scratch NumPy autodiff engine and a neural network that prunes itself during training"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "matplotlib>=3.7",     # plots only
+    "scikit-learn>=1.2",   # ONLY to load the bundled UCI digits dataset
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["aqua*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
