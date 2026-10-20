@@ -39,7 +39,8 @@ class RevivalMonitor:
             if age > self.horizon:
                 continue
             weight = self.pruner.layers[layer_i].weight
-            still_alive = weight.mask.ravel()[idx]
+            # Same incarnation only: alive *and* not dropped-then-regrown since birth.
+            still_alive = weight.mask.ravel()[idx] & (self.pruner.grown_at[layer_i].ravel()[idx] == birth)
             if still_alive.any():
                 upd = opt.last_update[id(weight)].ravel()[idx[still_alive]]
                 ratio = np.abs(upd) / opt.lr
