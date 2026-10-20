@@ -1,0 +1,30 @@
+{
+  "evaluated": true,
+  "claim": "fisher_obd - magnitude at 98% sparsity: mean paired test-acc diff >= +0.5pp and permutation p < 0.05",
+  "seeds": [
+    100,
+    101,
+    102,
+    103,
+    104,
+    105,
+    106,
+    107,
+    108,
+    109
+  ],
+  "fisher_obd_mean": 0.9601669999999999,
+  "magnitude_mean": 0.9479108,
+  "mean_diff": 0.012256199999999995,
+  "std_diff": 0.009021240353250273,
+  "ci95": [
+    0.006963600000000003,
+    0.0175484
+  ],
+  "p_value": 0.0078125,
+  "wins": 9,
+  "ties": 0,
+  "losses": 1,
+  "n": 10,
+  "holds": true
+}

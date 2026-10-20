@@ -1,0 +1,7 @@
+{
+  "python": "3.13.16",
+  "numpy": "2.5.3",
+  "platform": "Linux-6.18.44-fc-v139-x86_64-with-glibc2.39",
+  "processor": "x86_64",
+  "blas_threads": "1"
+}
