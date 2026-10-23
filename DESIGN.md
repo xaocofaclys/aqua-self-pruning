@@ -11,6 +11,7 @@ Contents
 7. [Where the autodiff engine bottlenecks](#7-bottlenecks)
 8. [Serving a self-pruned model in a multi-tenant service](#8-serving)
 9. [Known limitations](#9-limitations)
+10. [Post-hoc audit: what we got wrong, and what held](#10-post-hoc-audit)
 
 ---
 
@@ -121,11 +122,14 @@ curves along this weight, in loss units.
 ### Why `saliency` and `fisher_obd` tie
 
 E|w g| = |w|·E|g| and ½E[g²]w² = ½(|w|·RMS(g))². Both rank by
-**|w| × the gradient's typical size**. Since E|g| ≤ RMS(g) with roughly
-constant ratio across entries, the two orderings are nearly identical.
-Averaging the *absolute value* of the first-order term turns it into a
-curvature proxy. That's why |w·g| works, and also why it isn't really a
-first-order criterion.
+**|w| × the gradient's typical size**. Since E|g| ≤ RMS(g) with a roughly
+constant ratio across entries, the two orderings are strongly but not fully
+aligned. Measured at the 60%-sparsity pruning event of a real run (seed 100):
+Spearman rank correlation **0.95** between saliency and Fisher-OBD, and they
+agree on **67%** of the bottom 10% of weights (the ones about to be pruned).
+For comparison, magnitude vs Fisher-OBD: 0.55 and 28%. Averaging the
+*absolute value* of the first-order term turns it into a curvature proxy.
+That's why |w·g| works, and also why it isn't really a first-order criterion.
 
 ### Why it beats magnitude
 
@@ -134,6 +138,15 @@ curvature varies by orders of magnitude between weights: an input pixel that
 is always 0 after standardization makes its weights nearly free to delete
 whatever their size, and a hidden unit feeding many confident logits makes its
 weights expensive. Fisher-OBD weights |w|² by exactly that curvature.
+
+A mechanistic symptom, measured on the seed-100 models: at 98% sparsity,
+magnitude pruning spends **304 of its 1,690 surviving weights (18%)** on
+connections into or out of hidden units that are otherwise disconnected
+(exact compaction deletes them, or folds them into a bias, without changing
+the output). Fisher-OBD spends **0**. At 99%: 202 of 845 (24%) vs 32 of 845
+(4%). Magnitude can't see that a weight became useless because its neighbours
+were removed. Curvature can, at least for weights feeding a unit whose
+outputs are all gone: their gradient, and so their Fisher score, is exactly 0.
 
 ### Global ranking
 
@@ -265,8 +278,12 @@ Measured results are in [section 6](#revival-telemetry).
   * a grown weight starts at **exactly 0**, so the function is unchanged at
     the moment of growth (no loss spike);
   * it gets **fresh optimizer state with its own clock** (section 4);
-  * it is **protected for one window**, since a zero weight scores ≈ 0 and
-    would otherwise be dropped at the next update before it could learn;
+  * it is **protected through the next mask update**, since a zero weight
+    scores ≈ 0 and would otherwise be dropped before it could learn. (This
+    shield silently never fired until the post-hoc audit found an off-by-one;
+    see section 10. Fixed, 100% of regrown weights survive their first update,
+    but only about 12% survive the second, 32 steps after growth: a weight grown
+    from zero rarely catches established ones in that time.);
   * α decays to 0, so the topology settles before fine-tuning.
 
 ---
@@ -287,14 +304,16 @@ Test accuracy, mean ± std over 10 seeds (dense: **96.99 ± 0.39**):
 
 | sparsity | magnitude | saliency | **fisher_obd** | fisher_obd + regrow | taylor2 |
 |---|---|---|---|---|---|
-| 50% | 97.05 ± 0.27 | 97.02 ± 0.26 | 96.96 ± 0.40 | 97.13 ± 0.44 | 94.68 ± 0.78 |
-| 75% | 97.13 ± 0.44 | 97.02 ± 0.23 | 96.85 ± 0.26 | 97.10 ± 0.27 | 87.72 ± 3.37 |
-| 90% | 96.82 ± 0.46 | 97.02 ± 0.26 | 97.02 ± 0.40 | 97.10 ± 0.44 | 86.30 ± 6.91 |
-| 95% | 96.35 ± 0.52 | 96.88 ± 0.47 | 96.77 ± 0.51 | 97.02 ± 0.44 | 79.69 ± 12.1 |
-| 98% | 94.79 ± 0.57 | 95.96 ± 0.61 | 96.02 ± 0.63 | 96.24 ± 0.65 | 81.39 ± 8.42 |
-| 99% | 91.11 ± 1.73 | 94.85 ± 1.08 | 94.60 ± 0.91 | 94.62 ± 0.89 | 76.49 ± 10.9 |
+| 50% | 97.05 ± 0.27 | 97.02 ± 0.26 | 96.96 ± 0.40 | 97.33 ± 0.42 | 94.68 ± 0.78 |
+| 75% | 97.13 ± 0.44 | 97.02 ± 0.23 | 96.85 ± 0.26 | 97.16 ± 0.22 | 87.72 ± 3.37 |
+| 90% | 96.82 ± 0.46 | 97.02 ± 0.26 | 97.02 ± 0.40 | 97.05 ± 0.56 | 86.30 ± 6.91 |
+| 95% | 96.35 ± 0.52 | 96.88 ± 0.47 | 96.77 ± 0.51 | 96.85 ± 0.59 | 79.69 ± 12.1 |
+| 98% | 94.79 ± 0.57 | 95.96 ± 0.61 | 96.02 ± 0.63 | 96.21 ± 0.76 | 81.39 ± 8.42 |
+| 99% | 91.11 ± 1.73 | 94.85 ± 1.08 | 94.60 ± 0.91 | 94.85 ± 0.84 | 76.49 ± 10.9 |
 
 Every run met its budget exactly (re-checked row by row in `tests/test_claim.py`).
+The regrowth column was re-run after the audit fix (section 10); every other
+column is unchanged and bit-identical.
 
 ### 6.2 Baseline comparison: is it better than magnitude, and is it real?
 
@@ -335,26 +354,42 @@ bootstrap CI, exact sign-flip permutation p, and wins/ties/losses out of 10.
 
 ### 6.3 Regrowth and the optimizer revival bug: honest outcome
 
+Regrowth vs no regrowth (both Fisher-OBD, 10 paired seeds), after the audit fix:
+
+| sparsity | regrow − no regrow | 95% CI | p | W/T/L |
+|---|---|---|---|---|
+| 50% | **+0.36 pp** | [+0.17, +0.53] | 0.014 | 9/0/1 |
+| 75% | **+0.31 pp** | [+0.22, +0.39] | **0.004** | 9/1/0 |
+| 90% | +0.03 pp | [−0.33, +0.42] | 1.00 | 3/3/4 |
+| 95% | +0.08 pp | [−0.31, +0.45] | 0.78 | 4/3/3 |
+| 98% | +0.20 pp | [−0.25, +0.61] | 0.40 | 5/1/4 |
+| 99% | +0.25 pp | [−0.56, +1.00] | 0.60 | 6/0/4 |
+
+The optimizer handling of revived weights (all three variants use regrowth):
+
 | comparison (10 paired seeds) | 95% | 98% | 99% |
 |---|---|---|---|
-| fisher_obd + regrow − fisher_obd | +0.25 pp (p 0.34) | +0.22 pp (p 0.31) | +0.03 pp (p 0.98) |
-| textbook global-t Adam − correct (both with regrowth) | −0.08 pp (p 0.77) | −0.20 pp (p 0.09) | +0.36 pp (p 0.41) |
-| mask-unaware Adam − correct (both with regrowth) | +0.03 pp (p 0.88) | +0.08 pp (p 0.79) | +0.11 pp (p 0.70) |
+| textbook global-t Adam − correct | −0.08 pp (p 0.73) | +0.17 pp (p 0.58) | −0.11 pp (p 0.79) |
+| mask-unaware Adam − correct | +0.06 pp (p 0.88) | −0.17 pp (p 0.38) | +0.03 pp (p 0.99) |
 
-* **Regrowth** is never significantly better here. It's directionally
-  positive at 50–98%, which is consistent with RigL's results, but small
-  against seed noise on a task where pruning alone already almost matches
-  dense.
+* **Regrowth helps a little at moderate sparsity, and not where it would
+  matter most.** At 50% and 75% it wins 9 of 10 seeds (+0.3 pp). Only the 75%
+  result survives a Bonferroni correction for the six sparsities tested
+  (0.05 / 6 = 0.008). At 90–99% it makes no significant difference. Before the
+  audit fix none of these were significant, because 79% of regrown weights were
+  deleted after 16 steps.
 * **The revival bug does not measurably change final accuracy on this
-  task.** We report that plainly rather than claim the fix "saves" accuracy.
-  It does change optimizer behaviour by exactly the predicted amount (6.4
-  below). Plausible reasons it doesn't reach the accuracy number here: regrown
-  weights are about 20% of a small live set and start at 0, cosine LR decay
-  shrinks every step late in training, many regrown weights are dropped again
-  at the next update, and the problem is easy. We'd expect the bug to matter
-  more with larger learning rates, longer constant-LR phases or harder tasks,
-  but **we have not shown that**, so we don't claim it. The fix is justified
-  by correctness (the bit-exact equivalence test), not by this benchmark.
+  task**, and that conclusion survived the fix. With the shield broken one
+  could argue that revived weights died before the overshoot mattered. With
+  it working they live through the whole overshoot window, and accuracy still
+  doesn't move. The optimizer behaviour changes by exactly the predicted amount
+  (6.4 below), so the fix is justified by correctness (the bit-exact
+  equivalence test), not by this benchmark. Plausible reasons it doesn't reach
+  accuracy here: revived weights start at 0 and are a minority of a small live
+  set, cosine decay shrinks every step late in training, about 88% of regrown
+  weights are dropped at their second update anyway, and the problem is easy.
+  Larger learning rates, long constant-LR phases or harder tasks may make it
+  matter, but **we have not shown that**, so we don't claim it.
 
 <a id="revival-telemetry"></a>
 ### 6.4 Revival telemetry from real training runs
@@ -367,15 +402,17 @@ revived-connection samples at age 1 (`results/part4/revival.json`).
 
 | variant | mean at k=1 | k=5 | k=10 | k=30 | worst single step |
 |---|---|---|---|---|---|
-| per-entry clock (ours) | **0.96** | 0.40 | 0.29 | 0.15 | **1.05** |
-| textbook global-t, moments reset | 1.30 | 1.01 | 0.79 | 0.41 | **4.56** |
-| mask-unaware (no reset) | 0.03 | 0.05 | 0.05 | 0.25 | 4.15 |
+| per-entry clock (ours) | **0.97** | 0.41 | 0.29 | 0.22 | **1.16** |
+| textbook global-t, moments reset | 1.32 | 1.02 | 0.78 | 0.50 | **4.51** |
+| mask-unaware (no reset) | 0.03 | 0.05 | 0.06 | 0.07 | 4.01 |
 
 * **Ours behaves like a fresh Adam parameter.** The first step is lr·sign(g)
-  (0.96 rather than 1.00 only because of ε on tiny gradients), never more than
-  1.05 lr. Afterwards it decays as gradient noise makes m̂/√v̂ < 1.
-* **Global-t** takes 1.36× larger steps on average at k=1, about 2.7× at
-  k=10–30, and single steps up to 4.6× lr. In these runs regrowth happens
+  (0.97 rather than 1.00 only because of ε on tiny gradients). The largest step
+  seen is 1.16 lr: ordinary Adam can exceed 1 when a weight's gradients grow
+  over time (m adapts faster than v), and a fresh parameter does the same.
+  Afterwards it decays as gradient noise makes m̂/√v̂ < 1.
+* **Global-t** takes 1.36× larger steps on average at k=1, 2.3–2.7× at
+  k=10–30, and single steps up to 4.5× lr. In these runs regrowth happens
   between steps 96 and 768, where the global correction √(1−β₂ᵗ) is still
   noticeably below 1, so the inflation is smaller than the 3.16–6.5×
   asymptote. Revive later in a longer run and it converges to the closed form
@@ -384,10 +421,12 @@ revived-connection samples at age 1 (`results/part4/revival.json`).
   connection's previous life make revived weights nearly frozen (0.03 lr),
   so regrowth is almost a no-op. The occasional 4× outlier comes from stale
   first moments.
-* The steps in the curves at ages 16, 32 and 48 are a **survivorship effect**,
-  not an optimizer effect. Every 16 steps the next mask update re-drops the
-  lowest-scoring regrown weights, and those are the ones taking the smallest
-  steps, so the surviving population shifts upward.
+* The steps in the curves at ages 32 and 48 are a **survivorship effect**,
+  not an optimizer effect. Each mask update re-drops the lowest-scoring
+  regrown weights, and those are the ones taking the smallest steps, so the
+  surviving population shifts upward. There is no step at age 16 because the
+  shield carries every regrown weight through its first update. (Before the
+  audit fix there was a step at 16, which is how the bug shows up in this plot.)
 
 ### 6.5 Real cost: did it actually get cheaper?
 
@@ -417,7 +456,7 @@ warm-up, single-threaded, on the 2-core cloud VM listed in
 * **Unstructured CSR is a real FLOP reduction (100× at 99%) but not a
   latency win on this model.** A NumPy gather + `reduceat` kernel can't match
   BLAS on small matrices: it's slower at every sparsity at batch 256, and
-  only reaches parity with dense at 99% at batch 1. On large layers (synthetic
+  at batch 1 it is still 13% slower than dense even at 99% (33.8 vs 29.9 µs). On large layers (synthetic
   3×2048, below) the same kernel beats BLAS at batch 1 from about 90%
   sparsity, reaching 13× at 99%, but still loses at batch 64. Memory-bound
   batch-1 inference is where unstructured sparsity pays off without a
@@ -465,8 +504,8 @@ Before the fix below, the single largest cost was **`Adam.step`, at 0.88 s of
 4.2 s**: more than the entire forward and backward pass. The per-entry bias
 correction computed `np.power(β, t)` over every weight at every step. Entry
 clocks take few distinct values, so we gather from a precomputed 1 − βᵗ table
-instead. The result is bit-identical end to end (verified) and the step is
-several times cheaper.
+instead. The result is bit-identical end to end (verified), and re-profiling
+the same run puts `Adam.step` at **0.33 s** (from 0.88 s): **2.7× cheaper**.
 
 What remains, roughly in order:
 
@@ -567,3 +606,70 @@ at thousands of requests per second.
 * **Diagonal curvature.** Fisher-OBD ignores interactions between weights
   removed together. OBS-style (inverse-Fisher, WoodFisher) updates would
   correct the surviving weights when others are removed, at a higher cost.
+
+---
+
+## 10. Post-hoc audit
+
+After the first version was finished we re-audited it, looking specifically
+for a second bug hiding behind the well-advertised revival bug. Everything
+below was found by measurement, fixed in separate commits on top of the
+history (nothing rewritten), and is covered by a test where it can be.
+
+### Bugs and defects found
+
+| # | what was wrong | effect | fix | evidence |
+|---|---|---|---|---|
+| 1 | **Regrowth shield off by one.** `Pruner._protected` used `age < update_every`, but mask updates are exactly `update_every` steps apart, so at the next update a regrown weight's age *equals* `update_every` and the shield never fired. | 79% of regrown weights were deleted at their very first update, after 16 steps. Regrowth was mostly churn, and its results were understated. | `<=` | `test_regrown_weights_survive_their_first_mask_update`; survival 21% → 100%; regrowth now +0.3 pp at 50–75% (section 6.3); the age-16 step vanished from the revival plot |
+| 2 | **In-place mask edits bypassed `set_mask`.** `w.mask[i, j] = False` was allowed. | Latent: our code never did it, but anyone extending the code would get a forward pass still using the "removed" weight (stale cached mask), no hard zero, and no optimizer reset. | masks are read-only arrays | `test_in_place_mask_edit_is_refused` |
+| 3 | **NaN leaked into removed entries.** Optimizers masked by multiplying by the mask, and NaN × 0 = NaN. | Latent: a single non-finite gradient would have poisoned the "exactly zero" state of pruned entries. | `np.where`; the trainer raises on non-finite gradients | `test_nan_gradient_does_not_leak_into_removed_entries` |
+| 4 | **`sweep.py --quick` printed "FALSIFIED".** It evaluated the pre-registered claim on 1–2 seeds, where an exact permutation test cannot reach p < 0.05. | Misleading output for the first thing a reviewer is likely to run. | the claim is evaluated only on seeds 100–109, otherwise "not evaluated" | `test_quick_mode_does_not_report_falsified` |
+| 5 | **BLAS thread pinning used `setdefault`.** | A shell that already exported `OMP_NUM_THREADS` silently un-pinned it. | forced to 1 (opt out: `AQUA_ALLOW_THREADS=1`) | `scripts/_common.py` |
+| 6 | **`requirements.txt` pinned numpy 2.5.3**, which needs Python ≥ 3.12, while the README (and the brief) say 3.10+. | Install failure on Python 3.10 and 3.11. | lower bounds in `requirements.txt`; exact versions in `requirements-lock.txt` | pip metadata |
+| 7 | **Four overstated sentences in these docs:** "nearly identical orderings", "several times cheaper", CSR "reaches parity", and "6.5× confirmed by telemetry". | Claims stronger than the measurements. | replaced by the measured numbers (0.95 rank correlation and 67% overlap; 2.7×; 13% slower; 4.5× measured vs 6.5× closed form) | sections 2, 6.4, 6.5, 7 |
+
+We also added a test that gradchecks the **whole masked MLP after each of six
+rounds of random prune and regrow interleaved with Adam steps**. That's the
+literal form of "autodiff stays honest while the graph changes underneath it".
+
+### Methodology caveats (disclosed, not fixable after the fact)
+
+* **The pilot looked at the test split.** The pilot scripts printed test
+  accuracy next to validation, and the claim's +0.5 pp threshold was set after
+  seeing the pilot's test gap (+1.3 pp). The confirmatory *seeds* were fresh,
+  but the 359-image *test split* is the same one. A cleaner protocol would have
+  hidden test entirely until the confirmatory run. The pilot's validation gap
+  was +1.4 pp, so a validation-only pilot would have supported the same
+  threshold.
+* **"Selected on validation" is only half true.** `PREREGISTERED_CLAIM.md`
+  says the criterion was selected on validation. Validation rejected `taylor2`
+  decisively (about 85% vs 97%) and favoured global over per-layer scope, but
+  it could not separate saliency
+  (97.42%) from Fisher-OBD (97.35%). Fisher-OBD was chosen for the loss-units
+  argument that makes global ranking meaningful. We left the file unedited so
+  the pre-registration stays intact, and record the correction here.
+* **Only the pre-registered claim is confirmatory.** Every other p-value in
+  section 6 is exploratory and uncorrected for multiple comparisons, and
+  percentile-bootstrap intervals from 10 pairs are approximate.
+* **The empirical Fisher (data labels) is a known approximation** to the true
+  Fisher and the Hessian (Kunstner et al., 2019, "Limitations of the empirical
+  Fisher approximation"). Read Fisher-OBD as a derived heuristic, not an exact
+  curvature.
+
+### What we checked and what held
+
+* **The pre-registered claim is unaffected** (it involves no regrowth): +1.23 pp,
+  p = 0.0078.
+* **Reproducibility:** after all fixes, 12 randomly chosen non-regrowth sweep
+  rows re-run from a clean clone matched the committed CSV exactly. We also
+  simulated a machine with a different BLAS (every matmul via `einsum`'s
+  summation order): all 20 runs of the claim gave identical accuracies.
+* **macOS:** the sweep runs under the `spawn` process start method
+  (the macOS default).
+* **No output class is cut off**, even at 99% (every digit keeps at least 8
+  incoming weights under Fisher-OBD, 3 under magnitude).
+* **Adam's scale invariance is handled:** a 1e-30 gradient on a removed entry
+  does not move it. Adam would turn any tiny non-zero gradient into a
+  full-size step, so "near-zero" masking would not be enough.
+* **The revival-bug conclusion survived the shield fix** (section 6.3).
+
