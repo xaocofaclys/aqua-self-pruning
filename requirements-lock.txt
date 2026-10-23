@@ -1,0 +1,5 @@
+# Exact environment that produced results/ (Python 3.13, Linux x86_64).
+# numpy 2.5 requires Python >= 3.12; on 3.10/3.11 use requirements.txt instead.
+numpy==2.5.3
+matplotlib==3.11.2
+scikit-learn==1.9.1

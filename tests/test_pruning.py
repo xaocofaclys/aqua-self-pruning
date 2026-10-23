@@ -94,6 +94,39 @@ class PrunerEndToEnd(unittest.TestCase):
             if ev["step"] >= end:
                 self.assertAlmostEqual(ev["achieved"], 0.9, places=3)
 
+    def test_regrown_weights_survive_their_first_mask_update(self):
+        """Regression test for the protection off-by-one: a regrown weight starts
+        at 0 and scores ~0, so without protection it is deleted at the very next
+        update after only `update_every` steps (79% were, in the 98% sweep runs)."""
+        survival = []
+
+        class Watch(Pruner):
+            def after_step(self, trainer):
+                prev = [(i, g.copy()) for i, g in getattr(self, "_cohort", [])]
+                super().after_step(trainer)
+                if self.last_grown:  # an update happened: did the previous cohort survive it?
+                    if prev:
+                        alive = sum(int(self.layers[i].weight.mask.ravel()[g].sum()) for i, g in prev)
+                        survival.append(alive / sum(len(g) for _, g in prev))
+                    self._cohort = self.last_grown
+
+        import aqua.experiment as E
+        orig = E.Pruner
+        E.Pruner = Watch
+        try:
+            _quick(PruneConfig(criterion="fisher_obd", final_sparsity=0.9, scope="layer", update_every=4, regrow=True), epochs=10)
+        finally:
+            E.Pruner = orig
+        self.assertTrue(survival, "no regrowth events observed")
+        self.assertGreaterEqual(min(survival), 0.99, f"regrown weights deleted at their first update: {survival}")
+
+    def test_protection_window_boundaries(self):
+        model = MLP([4, 5, 3], np.random.default_rng(0))
+        p = Pruner(model, PruneConfig(update_every=16, regrow=True))
+        p.grown_at[0][0, 0] = 100
+        self.assertTrue(p._protected(0, 116)[0, 0])    # the next update: protected
+        self.assertFalse(p._protected(0, 132)[0, 0])   # the one after: judged normally
+
     def test_runs_are_bitwise_reproducible(self):
         a = _quick(PruneConfig(criterion="saliency", final_sparsity=0.8, update_every=4))
         b = _quick(PruneConfig(criterion="saliency", final_sparsity=0.8, update_every=4))

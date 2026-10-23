@@ -49,6 +49,18 @@ class PreregisteredClaim(unittest.TestCase):
             self.assertLess(abs(target - achieved), 2.0 / int(r["total_weights"]), r)
 
 
+class ClaimNeedsItsSeeds(unittest.TestCase):
+    def test_quick_mode_does_not_report_falsified(self):
+        import sys
+        sys.path.insert(0, str(RAW.parent.parent.parent / "scripts"))
+        import sweep
+        row = lambda acc: {"test_acc": acc}
+        by = {("fisher_obd", 0.98): {100: row(0.97), 101: row(0.96)}, ("magnitude", 0.98): {100: row(0.95), 101: row(0.94)}}
+        verdict = sweep.evaluate_claim(by)
+        self.assertFalse(verdict["evaluated"])
+        self.assertNotIn("holds", verdict)
+
+
 class StatsSanity(unittest.TestCase):
     def test_permutation_pvalue_known_values(self):
         self.assertEqual(paired_permutation_pvalue(np.ones(10)), 2 / 1024)

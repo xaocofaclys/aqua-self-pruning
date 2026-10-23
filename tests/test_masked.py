@@ -222,6 +222,56 @@ class AdamMatchesReferenceUnderMaskChurn(unittest.TestCase):
             np.testing.assert_allclose(p.data, w, rtol=1e-13, atol=1e-15)
 
 
+class TopologyChangesAreSafe(unittest.TestCase):
+    def test_in_place_mask_edit_is_refused(self):
+        """Editing a mask in place would bypass set_mask (stale forward cache, no
+        zeroing, no optimizer reset). It must raise, not silently corrupt training."""
+        layer = MaskedLinear(4, 3, np.random.default_rng(0))
+        with self.assertRaises(ValueError):
+            layer.weight.mask[0, 0] = False
+        new = layer.weight.mask.copy()
+        new[0, 0] = False
+        layer.weight.set_mask(new)  # the supported path still works
+        with self.assertRaises(ValueError):
+            layer.weight.mask[1, 1] = False
+
+    def test_nan_gradient_does_not_leak_into_removed_entries(self):
+        for opt_cls in (Adam, SGD):
+            with self.subTest(opt=opt_cls.__name__):
+                p = Parameter(np.zeros(3), prunable=True)
+                p.set_mask(np.array([True, False, True]))
+                opt = opt_cls([p], lr=1e-2)
+                p.grad = np.array([0.1, np.nan, 0.1])  # garbage at a removed entry only
+                opt.step()
+                self.assertTrue(np.isfinite(p.data).all())
+                self.assertEqual(p.data[1], 0.0)
+                state = [opt.state[id(p)].m, opt.state[id(p)].v] if opt_cls is Adam else [opt.velocity[id(p)]]
+                for arr in state:
+                    self.assertEqual(arr[1], 0.0)
+
+    def test_gradients_stay_exact_while_the_graph_changes(self):
+        """Gradcheck the whole masked MLP after every topology change during
+        training (prune and regrow events interleaved with Adam steps)."""
+        rng = np.random.default_rng(5)
+        model = MLP([5, 7, 6, 3], rng, activation="tanh")
+        opt = Adam(model.parameters(), lr=1e-2)
+        x, y = rng.standard_normal((9, 5)), rng.integers(0, 3, size=9)
+        loss_fn = lambda *_: softmax_cross_entropy(model(Tensor(x)), y)
+        for event in range(6):
+            for _ in range(5):
+                opt.zero_grad(); loss_fn().backward(); opt.step()
+            for w in model.prunable_weights():  # random prune + regrow
+                w.set_mask(rng.random(w.shape) > 0.5)
+            for p in model.parameters():
+                # eps=1e-5: some entries here are ~1e-6 in size, where eps=1e-6
+                # central differences hit float64 roundoff (abs err ~1e-11).
+                res = gradcheck(loss_fn, [p], eps=1e-5)
+                self.assertLess(res.max_rel_error, 1e-6, f"event {event}, {p.name}")
+                if p.mask is not None:
+                    self.assertTrue(np.all(res.analytic[0][~p.mask] == 0.0))
+                    self.assertTrue(np.all(p.data[~p.mask] == 0.0))
+
+
 class ModelLevel(unittest.TestCase):
     def test_mlp_sparsity_accounting_and_state_dict_roundtrip(self):
         rng = np.random.default_rng(0)

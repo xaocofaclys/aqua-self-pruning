@@ -123,8 +123,13 @@ class Pruner:
         return np.nan_to_num(s, nan=-np.inf)
 
     def _protected(self, i: int, step: int) -> np.ndarray:
-        # Freshly grown weights start at 0 and score ~0: shield them for one window.
-        return (step - self.grown_at[i]) < self.cfg.update_every
+        """Freshly grown weights start at 0 and score ~0: shield them through the
+        NEXT mask update, so each gets one full window of training before it is
+        judged.  Mask updates are exactly ``update_every`` steps apart, so at the
+        next update a weight's age equals ``update_every``: the comparison must be
+        ``<=``.  (A strict ``<`` never protects anything; it was the original bug,
+        and it let ~79% of regrown weights be deleted after only 16 steps.)"""
+        return (step - self.grown_at[i]) <= self.cfg.update_every
 
     @staticmethod
     def _rank_alive(score: np.ndarray, alive: np.ndarray, protected: np.ndarray) -> np.ndarray:

@@ -25,9 +25,18 @@ class Parameter(Tensor):
 
     def __init__(self, data, *, name: str | None = None, prunable: bool = False) -> None:
         super().__init__(np.array(data, dtype=np.float64, copy=True), requires_grad=True, name=name)
-        self.mask: np.ndarray | None = np.ones(self.shape, dtype=bool) if prunable else None
+        self.mask: np.ndarray | None = self._frozen(np.ones(self.shape, dtype=bool)) if prunable else None
         self.mask_version = 0
         self._listeners: list[weakref.WeakMethod | Callable] = []
+
+    @staticmethod
+    def _frozen(mask: np.ndarray) -> np.ndarray:
+        # Read-only: an in-place edit (``w.mask[i, j] = False``) would bypass
+        # set_mask, so the forward pass would keep using a stale cached mask, the
+        # weight would not be zeroed and the optimizer would not reset its state.
+        # Make that mistake raise instead of silently corrupting training.
+        mask.flags.writeable = False
+        return mask
 
     @property
     def prunable(self) -> bool:
@@ -44,7 +53,7 @@ class Parameter(Tensor):
         if new_mask.shape != self.shape:
             raise ValueError(f"mask shape {new_mask.shape} != parameter shape {self.shape}")
         old_mask = self.mask
-        self.mask = new_mask.copy()
+        self.mask = self._frozen(new_mask.copy())
         self.data[~self.mask] = 0.0  # a genuine zero, not a near-zero weight
         self.mask_version += 1
         alive = []

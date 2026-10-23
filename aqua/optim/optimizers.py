@@ -59,7 +59,8 @@ class Optimizer:
 
     def _apply(self, p: Parameter, update: np.ndarray, active: np.ndarray | None) -> None:
         if active is not None:
-            update = update * active
+            # np.where, not `* active`: NaN * 0 = NaN would leak into removed entries.
+            update = np.where(active, update, 0.0)
         p.data -= update
         if active is not None:
             p.data[~active] = 0.0  # keep removed entries a bit-exact zero
@@ -138,7 +139,7 @@ class Adam(Optimizer):
                 continue
             st = self.state[id(p)]
             active = self._active(p)
-            g = p.grad if active is None else p.grad * active
+            g = p.grad if active is None else np.where(active, p.grad, 0.0)
 
             st.m *= b1
             st.m += (1.0 - b1) * g
@@ -193,13 +194,13 @@ class SGD(Optimizer):
             if p.grad is None:
                 continue
             active = self._active(p)
-            g = p.grad if active is None else p.grad * active
+            g = p.grad if active is None else np.where(active, p.grad, 0.0)
             if self.weight_decay:
                 g = g + self.weight_decay * p.data
             vel = self.velocity[id(p)]
             vel *= self.momentum
             vel += g
             if active is not None:
-                vel *= active
+                vel[~active] = 0.0
             direction = g + self.momentum * vel if self.nesterov else vel
             self._apply(p, self.lr * direction, active)

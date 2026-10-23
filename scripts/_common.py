@@ -14,8 +14,11 @@ import platform
 import sys
 from pathlib import Path
 
-for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
-    os.environ.setdefault(_var, "1")
+if os.environ.get("AQUA_ALLOW_THREADS") != "1":
+    # Forced, not setdefault: a shell that already exports OMP_NUM_THREADS=8
+    # would otherwise silently un-pin BLAS and change the arithmetic.
+    for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+        os.environ[_var] = "1"
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:

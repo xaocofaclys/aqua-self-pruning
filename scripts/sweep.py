@@ -126,6 +126,11 @@ def evaluate_claim(by) -> dict:
     if not a or not b:
         return {"evaluated": False, "reason": "98% runs missing (quick mode?)"}
     seeds = sorted(set(a) & set(b))
+    if seeds != SEEDS:
+        # The claim is defined on seeds 100-109 only.  With fewer seeds the exact
+        # permutation test cannot reach p < 0.05 (2 seeds: p >= 0.5), so printing
+        # "falsified" in quick mode would be wrong, not merely noisy.
+        return {"evaluated": False, "reason": f"claim is defined on seeds {SEEDS[0]}-{SEEDS[-1]}; this run has {seeds}"}
     cmp = paired_comparison([a[s]["test_acc"] for s in seeds], [b[s]["test_acc"] for s in seeds])
     holds = cmp["mean_diff"] >= 0.005 and cmp["p_value"] < 0.05
     return {
@@ -251,6 +256,36 @@ def revival_only(out, n_jobs) -> None:
     replot(out)
 
 
+def rerun(out, methods: list[str], n_jobs: int) -> None:
+    """Re-execute every row of the given methods (e.g. after a bug fix that only
+    affects them), replace those rows in sweep_raw.csv, and rebuild every
+    derived file.  All other rows are left exactly as committed."""
+    rows = _load_rows(out)
+    known = {r["method"] for r in rows}
+    unknown = sorted(set(methods) - known)
+    if unknown:
+        raise SystemExit(f"unknown methods {unknown}; known: {sorted(known)}")
+    kept = [r for r in rows if r["method"] not in methods]
+    jobs = [j for j in build_jobs(SEEDS, SPARSITIES) if j[0] in methods]
+    print(f"re-running {len(jobs)} runs of {methods}", flush=True)
+    fresh, revival_raw = [], defaultdict(list)
+    with Pool(n_jobs) as pool:
+        for i, (row, rev) in enumerate(pool.imap_unordered(_job, jobs, chunksize=1), 1):
+            fresh.append(row)
+            if rev and row["target_sparsity"] >= 0.95:
+                revival_raw[row["method"]].append(rev)
+            if i % 20 == 0 or i == len(jobs):
+                print(f"  {i}/{len(jobs)} done", flush=True)
+    merged = sorted(kept + fresh, key=lambda r: (r["method"], r["target_sparsity"], r["seed"]))
+    write_csv(out / "sweep_raw.csv", merged)
+    if revival_raw:
+        import json
+        revival = json.loads((out / "revival.json").read_text())
+        revival.update(_aggregate_revival(revival_raw))
+        write_json(out / "revival.json", revival)
+    replot(out)
+
+
 def replot(out) -> None:
     import json
 
@@ -270,10 +305,13 @@ def main() -> None:
     ap.add_argument("--jobs", type=int, default=os.cpu_count() or 1)
     ap.add_argument("--revival-only", action="store_true",
                     help="rerun only the regrowth runs (>=95%%) to recompute revival.json; asserts they reproduce sweep_raw.csv exactly")
+    ap.add_argument("--rerun", metavar="METHODS", help="comma-separated methods to re-execute and replace in sweep_raw.csv")
     ap.add_argument("--replot", action="store_true", help="recompute summaries and figures from the committed sweep_raw.csv (no training)")
     args = ap.parse_args()
     if args.replot:
         return replot(out_dir("part4"))
+    if args.rerun:
+        return rerun(out_dir("part4"), args.rerun.split(","), args.jobs)
     if args.revival_only:
         return revival_only(out_dir("part4"), args.jobs)
     seeds = SEEDS[:2] if args.quick else SEEDS
@@ -312,7 +350,8 @@ def main() -> None:
                 a = np.array([r["test_acc"] for r in by[(m, sp)].values()])
                 cells.append(f"{sp:.0%}: {a.mean():.4f}±{a.std(ddof=1):.4f}")
         print(f"  {m:22s} " + "  ".join(cells))
-    print("\nclaim:", "HOLDS" if claim.get("holds") else "FALSIFIED / not evaluated", claim)
+    verdict = "NOT EVALUATED" if not claim.get("evaluated") else ("HOLDS" if claim["holds"] else "FALSIFIED")
+    print("\nclaim:", verdict, claim)
 
 
 if __name__ == "__main__":

@@ -108,6 +108,9 @@ class Trainer:
                     raise FloatingPointError(f"non-finite loss {loss.item()} at step {self.step}")
                 self.optimizer.zero_grad()
                 loss.backward()
+                for p in self.optimizer.params:
+                    if p.grad is not None and not np.isfinite(p.grad).all():
+                        raise FloatingPointError(f"non-finite gradient in {p.name!r} at step {self.step}")
                 for hook in self.hooks:
                     hook.after_backward(self)
                 self.optimizer.step()

@@ -1,4 +1,6 @@
-# Versions the committed results were produced with (see results/*/environment):
-numpy==2.5.3
-matplotlib==3.11.2
-scikit-learn==1.9.1   # dataset loading only (sklearn.datasets.load_digits)
+# Works on Python 3.10+ (the brief's minimum). Lower bounds only, so pip can pick
+# versions that exist for your Python. Exact versions used for the committed
+# results: requirements-lock.txt (needs Python >= 3.12, numpy 2.5's minimum).
+numpy>=1.24
+matplotlib>=3.7       # plots only
+scikit-learn>=1.2     # dataset loading only (sklearn.datasets.load_digits)
